@@ -13,7 +13,7 @@ import (
 
 // BookModel Library item model
 type BookModel struct {
-	ID          int       `json:"id"`
+	ID          string    `json:"book_id"`
 	Name        string    `json:"name"`
 	Authors     []*string `json:"authors"`
 	Categories  []*string `json:"categories"`
@@ -22,10 +22,7 @@ type BookModel struct {
 }
 
 // LambdaEvent Lambda Event (params)
-type LambdaEvent struct {
-	Name string `json:"name"`
-	Age  string `json:"age"`
-}
+type LambdaEvent struct {}
 
 // LambdaResponse Lambda response
 type LambdaResponse struct {
