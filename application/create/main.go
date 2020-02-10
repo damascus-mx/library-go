@@ -62,7 +62,7 @@ func HandleLambdaEvent(ctx context.Context, event LambdaEvent) (*LambdaResponse,
 			categories = event.Categories
 		}
 
-		book := model.NewBook(event.Name, authors, categories, pubAt)
+		book := model.NewBook(event.Name, nil, authors, categories, pubAt)
 
 		bookMap, err := dynamodbattribute.MarshalMap(book)
 		if err != nil {
