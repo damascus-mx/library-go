@@ -61,7 +61,7 @@ func HandleLambdaEvent(ctx context.Context, req events.APIGatewayProxyRequest) (
 			return proxyResponseBuilder(err.Error(), http.StatusInternalServerError)
 		}
 
-		return proxyResponseBuilder(fmt.Sprintf("Book successfully %s deleted", bookID), http.StatusOK)
+		return proxyResponseBuilder(fmt.Sprintf("Book %s successfully deleted", bookID), http.StatusOK)
 	}
 
 	return proxyResponseBuilder("id is required", http.StatusBadRequest)

@@ -83,7 +83,15 @@ func HandleLambdaEvent(ctx context.Context, req events.APIGatewayProxyRequest) (
 
 	bookJSON, _ := json.Marshal(&books[0])
 
-	return proxyResponseBuilder(string(bookJSON), http.StatusOK)
+	return &events.APIGatewayProxyResponse{
+		StatusCode:        http.StatusOK,
+		Headers:           map[string]string{
+			"Access-Control-Allow-Origin": "*",
+		},
+		MultiValueHeaders: nil,
+		Body:             string(bookJSON),
+		IsBase64Encoded:   false,
+	}, nil
 }
 
 func main() {
