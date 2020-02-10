@@ -79,7 +79,7 @@ func HandleLambdaEvent(ctx context.Context, event LambdaEvent) (*LambdaResponse,
 			return nil, err
 		}
 
-		return &LambdaResponse{fmt.Sprintf("User %s created", book.ID)}, nil
+		return &LambdaResponse{fmt.Sprintf("Book %s created", book.ID)}, nil
 	}
 
 	return nil, errors.New("name is required")
