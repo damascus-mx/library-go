@@ -6,6 +6,6 @@ type BookModel struct {
 	Name        string    `json:"name"`
 	Authors     []*string `json:"authors"`
 	Categories  []*string `json:"categories"`
-	PublishedAt int       `json:"published_at"`
-	CreatedAt   int       `json:"created_at"`
+	PublishedAt int64      `json:"published_at"`
+	CreatedAt   int64      `json:"created_at"`
 }
