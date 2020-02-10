@@ -74,7 +74,7 @@ func HandleLambdaEvent(ctx context.Context, req events.APIGatewayProxyRequest) (
 	var books []model.BookModel
 	err = dynamodbattribute.UnmarshalListOfMaps(result.Items, &books)
 	if err != nil {
-		return nil, err
+		return proxyResponseBuilder(err.Error(), http.StatusInternalServerError)
 	}
 
 	if len(books) < 1 {
