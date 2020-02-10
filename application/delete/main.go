@@ -2,24 +2,16 @@ package main
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
+	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
+	"net/http"
 	"os"
 )
-
-// LambdaEvent Lambda params
-type LambdaEvent struct {
-	ID string `json:"id"`
-}
-
-// LambdaResponse Lambda response model
-type LambdaResponse struct {
-	Message string `json:"message"`
-}
 
 func getSession() *session.Session {
 	config := &aws.Config{
@@ -31,11 +23,28 @@ func getSession() *session.Session {
 	return sess
 }
 
-// HandleLambdaEvent Lambda Handler
-func HandleLambdaEvent(ctx context.Context, event LambdaEvent) (*LambdaResponse, error) {
-	if event.ID != "" {
-		bookID := event.ID
+func proxyResponseBuilder(messageStr string, status int) (*events.APIGatewayProxyResponse, error) {
+	message := struct {
+		Message string
+	}{ messageStr }
 
+	jsonMsg, _ := json.Marshal(message)
+
+	return &events.APIGatewayProxyResponse{
+		StatusCode:        status,
+		Headers:           map[string]string{
+			"Access-Control-Allow-Origin": "*",
+		},
+		MultiValueHeaders: nil,
+		Body:             string(jsonMsg),
+		IsBase64Encoded:   false,
+	}, nil
+}
+
+// HandleLambdaEvent Lambda Handler
+func HandleLambdaEvent(ctx context.Context, req events.APIGatewayProxyRequest) (*events.APIGatewayProxyResponse, error) {
+	bookID := req.PathParameters["id"]
+	if bookID != "" {
 		db := dynamodb.New(getSession())
 
 		query := &dynamodb.DeleteItemInput{
@@ -49,13 +58,13 @@ func HandleLambdaEvent(ctx context.Context, event LambdaEvent) (*LambdaResponse,
 
 		_, err := db.DeleteItem(query)
 		if err != nil {
-			return nil, err
+			return proxyResponseBuilder(err.Error(), http.StatusInternalServerError)
 		}
 
-		return &LambdaResponse{fmt.Sprintf("Book %s deleted", bookID)}, nil
+		return proxyResponseBuilder(fmt.Sprintf("Book successfully %s deleted", bookID), http.StatusOK)
 	}
 
-	return nil, errors.New("id is required")
+	return proxyResponseBuilder("id is required", http.StatusBadRequest)
 }
 
 func main() {

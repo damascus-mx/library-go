@@ -2,20 +2,35 @@ package main
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
+	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
+	"net/http"
 	"os"
 
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/damascus-mx/library-go/application/getByID/domain/model"
 )
 
-// LambdaEvent AWS lambda params/events
-type LambdaEvent struct{
-	ID string `json:"id"`
+func proxyResponseBuilder(messageStr string, status int) (*events.APIGatewayProxyResponse, error) {
+	message := struct {
+		Message string
+	}{ messageStr }
+
+	jsonMsg, _ := json.Marshal(message)
+
+	return &events.APIGatewayProxyResponse{
+		StatusCode:        status,
+		Headers:           map[string]string{
+			"Access-Control-Allow-Origin": "*",
+		},
+		MultiValueHeaders: nil,
+		Body:             string(jsonMsg),
+		IsBase64Encoded:   false,
+	}, nil
 }
 
 func getSession() *session.Session {
@@ -29,12 +44,12 @@ func getSession() *session.Session {
 }
 
 // HandleLambdaEvent AWS Lambda handler
-func HandleLambdaEvent(ctx context.Context, event LambdaEvent) (*model.BookModel, error) {
+func HandleLambdaEvent(ctx context.Context, req events.APIGatewayProxyRequest) (*events.APIGatewayProxyResponse, error) {
 	db := dynamodb.New(getSession())
 
-	idQuery := event.ID
+	idQuery := req.PathParameters["id"]
 	if idQuery == "" {
-		return nil, errors.New("id not provided")
+		return proxyResponseBuilder("id is required", http.StatusBadRequest)
 	}
 
 	var queryInput = &dynamodb.QueryInput{
@@ -53,7 +68,7 @@ func HandleLambdaEvent(ctx context.Context, event LambdaEvent) (*model.BookModel
 
 	result, err := db.Query(queryInput)
 	if err != nil {
-		return nil, err
+		return proxyResponseBuilder(err.Error(), http.StatusInternalServerError)
 	}
 
 	var books []model.BookModel
@@ -63,10 +78,12 @@ func HandleLambdaEvent(ctx context.Context, event LambdaEvent) (*model.BookModel
 	}
 
 	if len(books) < 1 {
-		return nil, errors.New("book not found")
+		return proxyResponseBuilder("book not found", http.StatusNotFound)
 	}
 
-	return &books[0], nil
+	bookJSON, _ := json.Marshal(&books[0])
+
+	return proxyResponseBuilder(string(bookJSON), http.StatusOK)
 }
 
 func main() {

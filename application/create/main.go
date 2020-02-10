@@ -2,30 +2,19 @@ package main
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
+	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
 	"github.com/damascus-mx/library-go/application/create/domain/model"
+	"net/http"
 	"os"
 	"strconv"
 )
-
-// LambdaEvent AWS lambda params/events
-type LambdaEvent struct{
-	Name string `json:"name"`
-	PublishedAt string `json:"published_at"`
-	Authors []*string `json:"authors"`
-	Categories []*string `json:"categories"`
-}
-
-// LambdaResponse AWS lambda response
-type LambdaResponse struct {
-	Message string `json:"message"`
-}
 
 func getSession() *session.Session {
 	config := &aws.Config{
@@ -37,36 +26,67 @@ func getSession() *session.Session {
 	return sess
 }
 
+type EventBody struct {
+	Name string `json:"name"`
+	PublishedAt string `json:"published_at"`
+	Authors []*string `json:"authors"`
+	Categories []*string `json:"categories"`
+}
+
+func proxyResponseBuilder(messageStr string, status int) (*events.APIGatewayProxyResponse, error) {
+	message := struct {
+		Message string
+	}{ messageStr }
+
+	jsonMsg, _ := json.Marshal(message)
+
+	return &events.APIGatewayProxyResponse{
+		StatusCode:        status,
+		Headers:           map[string]string{
+			"Access-Control-Allow-Origin": "*",
+		},
+		MultiValueHeaders: nil,
+		Body:             string(jsonMsg),
+		IsBase64Encoded:   false,
+	}, nil
+}
 
 // HandleLambdaEvent AWS Lambda handler
-func HandleLambdaEvent(ctx context.Context, event LambdaEvent) (*LambdaResponse, error) {
-	if event.Name != "" {
+func HandleLambdaEvent(ctx context.Context, req events.APIGatewayProxyRequest) (*events.APIGatewayProxyResponse, error) {
+	
+	var body EventBody
+	err := json.Unmarshal([]byte(req.Body), &body)
+	if err != nil {
+		return proxyResponseBuilder(err.Error(), http.StatusInternalServerError)
+	}
+
+	if body.Name != "" {
 		db := dynamodb.New(getSession())
 		
-		pubAt, err := strconv.ParseInt(event.PublishedAt, 10, 64)
+		pubAt, err := strconv.ParseInt(body.PublishedAt, 10, 64)
 		if err != nil {
 			pubAt = 0
 		}
 
 		var authors []*string
-		if len(event.Authors) == 0 {
+		if len(body.Authors) == 0 {
 			authors = nil
 		} else {
-			authors = event.Authors
+			authors = body.Authors
 		}
 
 		var categories []*string
-		if len(event.Categories) == 0 {
+		if len(body.Categories) == 0 {
 			categories = nil
 		} else {
-			categories = event.Categories
+			categories = body.Categories
 		}
 
-		book := model.NewBook(event.Name, nil, authors, categories, pubAt)
+		book := model.NewBook(body.Name, nil, authors, categories, pubAt)
 
 		bookMap, err := dynamodbattribute.MarshalMap(book)
 		if err != nil {
-			return nil, err
+			return proxyResponseBuilder(err.Error(), http.StatusInternalServerError)
 		}
 
 		params := &dynamodb.PutItemInput{
@@ -76,13 +96,19 @@ func HandleLambdaEvent(ctx context.Context, event LambdaEvent) (*LambdaResponse,
 
 		_, err = db.PutItem(params)
 		if err != nil {
-			return nil, err
+			return proxyResponseBuilder(err.Error(), http.StatusInternalServerError)
 		}
 
-		return &LambdaResponse{fmt.Sprintf("Book %s created", book.ID)}, nil
+		message := struct {
+			Message string
+		}{ fmt.Sprintf("Book %s created", book.ID) }
+
+		jsonMsg, _ := json.Marshal(message)
+
+		return proxyResponseBuilder(string(jsonMsg), http.StatusOK)
 	}
 
-	return nil, errors.New("name is required")
+	return proxyResponseBuilder("name is required", http.StatusBadRequest)
 }
 
 func main() {

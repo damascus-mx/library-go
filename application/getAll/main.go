@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"github.com/aws/aws-lambda-go/events"
+	"net/http"
 	"os"
 
 	"github.com/aws/aws-lambda-go/lambda"
@@ -22,12 +25,22 @@ type BookModel struct {
 	CreatedAt   int64     `json:"created_at"`
 }
 
-// LambdaEvent Lambda Event (params)
-type LambdaEvent struct {}
+func proxyResponseBuilder(messageStr string, status int) (*events.APIGatewayProxyResponse, error) {
+	message := struct {
+		Message string
+	}{ messageStr }
 
-// LambdaResponse Lambda response
-type LambdaResponse struct {
-	Message string `json:"message"`
+	jsonMsg, _ := json.Marshal(message)
+
+	return &events.APIGatewayProxyResponse{
+		StatusCode:        status,
+		Headers:           map[string]string{
+			"Access-Control-Allow-Origin": "*",
+		},
+		MultiValueHeaders: nil,
+		Body:             string(jsonMsg),
+		IsBase64Encoded:   false,
+	}, nil
 }
 
 func getSession() *session.Session {
@@ -41,7 +54,7 @@ func getSession() *session.Session {
 }
 
 // HandleLambdaEvent Lambda handler
-func HandleLambdaEvent(ctx context.Context, event LambdaEvent) ([]BookModel, error) {
+func HandleLambdaEvent(ctx context.Context, req events.APIGatewayProxyRequest) (*events.APIGatewayProxyResponse, error) {
 	db := dynamodb.New(getSession())
 
 	params := &dynamodb.ScanInput{
@@ -50,16 +63,20 @@ func HandleLambdaEvent(ctx context.Context, event LambdaEvent) ([]BookModel, err
 
 	result, err := db.Scan(params)
 	if err != nil {
-		return nil, err
+		return proxyResponseBuilder(err.Error(), http.StatusInternalServerError)
 	}
 
 	var books []BookModel
 	err = dynamodbattribute.UnmarshalListOfMaps(result.Items, &books)
 	if err != nil {
-		return nil, err
+		return proxyResponseBuilder(err.Error(), http.StatusInternalServerError)
+	} else if len(books) == 0 {
+		return proxyResponseBuilder("books not found", http.StatusNotFound)
 	}
 
-	return books, nil
+	booksJSON, _ := json.Marshal(books)
+
+	return proxyResponseBuilder(string(booksJSON), http.StatusOK)
 }
 
 func main() {
