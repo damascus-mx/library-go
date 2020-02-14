@@ -4,10 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"os"
-	"strconv"
-
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go/aws"
@@ -15,6 +11,9 @@ import (
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
 	"github.com/damascus-mx/library-go/services/book/application/create/domain/model"
+	"net/http"
+	"os"
+	"strconv"
 )
 
 type EventBody struct {
@@ -37,17 +36,20 @@ func getSession() *session.Session {
 func proxyResponseBuilder(messageStr string, status int) (*events.APIGatewayProxyResponse, error) {
 	message := struct {
 		Message string
-	}{messageStr}
+	}{ messageStr }
 
-	jsonMsg, _ := json.Marshal(message)
+	jsonMsg, err := json.Marshal(message)
+	if err != nil {
+		return nil, err
+	}
 
 	return &events.APIGatewayProxyResponse{
-		StatusCode: status,
-		Headers: map[string]string{
+		StatusCode:        status,
+		Headers:           map[string]string{
 			"Access-Control-Allow-Origin": "*",
 		},
 		MultiValueHeaders: nil,
-		Body:              string(jsonMsg),
+		Body:             string(jsonMsg),
 		IsBase64Encoded:   false,
 	}, nil
 }
@@ -58,8 +60,10 @@ func HandleLambdaEvent(ctx context.Context, req events.APIGatewayProxyRequest) (
 	var body EventBody
 	err := json.Unmarshal([]byte(req.Body), &body)
 	if err != nil {
-		return proxyResponseBuilder("Missing required fields", http.StatusBadRequest)
+		return proxyResponseBuilder("missing required fields", http.StatusBadRequest)
 	}
+
+
 
 	if body.Name != "" {
 		db := dynamodb.New(getSession())

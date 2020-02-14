@@ -1,4 +1,4 @@
-module github.com/damascus-mx/library-go/application/create
+module github.com/damascus-mx/library-go/services/book/application/create
 
 go 1.13
 
