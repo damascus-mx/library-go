@@ -2,120 +2,117 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"github.com/aws/aws-lambda-go/events"
-	"github.com/aws/aws-lambda-go/lambda"
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
-	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
-	"github.com/damascus-mx/library-go/services/book/application/create/domain/model"
+	ginadapter "github.com/awslabs/aws-lambda-go-api-proxy/gin"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
+	"time"
+
+	"gocloud.dev/docstore"
+	_ "gocloud.dev/docstore/awsdynamodb"
+	"github.com/aws/aws-lambda-go/events"
+	"github.com/aws/aws-lambda-go/lambda"
+
+	"github.com/damascus-mx/library-go/services/book/application/create/domain/model"
+	"github.com/gin-gonic/gin"
 )
 
-type EventBody struct {
-	Name string `json:"name"`
-	PublishedAt string `json:"published_at"`
-	Authors []*string `json:"authors"`
-	Categories []*string `json:"categories"`
-}
+var ginLambda *ginadapter.GinLambda
 
-func getSession() *session.Session {
-	config := &aws.Config{
-		Region: aws.String("us-east-1"),
-	}
+func init() {
+	log.Printf("Gin cold start")
+	r := gin.Default()
 
-	sess := session.Must(session.NewSession(config))
+	r.POST("/v1/book", SaveHandler)
 
-	return sess
-}
-
-func proxyResponseBuilder(messageStr string, status int) (*events.APIGatewayProxyResponse, error) {
-	message := struct {
-		Message string
-	}{ messageStr }
-
-	jsonMsg, err := json.Marshal(message)
-	if err != nil {
-		return nil, err
-	}
-
-	return &events.APIGatewayProxyResponse{
-		StatusCode:        status,
-		Headers:           map[string]string{
-			"Access-Control-Allow-Origin": "*",
-		},
-		MultiValueHeaders: nil,
-		Body:             string(jsonMsg),
-		IsBase64Encoded:   false,
-	}, nil
-}
-
-// HandleLambdaEvent AWS Lambda handler
-func HandleLambdaEvent(ctx context.Context, req events.APIGatewayProxyRequest) (*events.APIGatewayProxyResponse, error) {
-
-	var body EventBody
-	err := json.Unmarshal([]byte(req.Body), &body)
-	if err != nil {
-		return proxyResponseBuilder("missing required fields", http.StatusBadRequest)
-	}
-
-
-
-	if body.Name != "" {
-		db := dynamodb.New(getSession())
-
-		pubAt, err := strconv.ParseInt(body.PublishedAt, 10, 64)
-		if err != nil {
-			pubAt = 0
-		}
-
-		var authors []*string
-		if len(body.Authors) == 0 {
-			authors = nil
-		} else {
-			authors = body.Authors
-		}
-
-		var categories []*string
-		if len(body.Categories) == 0 {
-			categories = nil
-		} else {
-			categories = body.Categories
-		}
-
-		book := model.NewBook(body.Name, nil, authors, categories, pubAt)
-
-		bookMap, err := dynamodbattribute.MarshalMap(book)
-		if err != nil {
-			return proxyResponseBuilder(err.Error(), http.StatusInternalServerError)
-		}
-
-		params := &dynamodb.PutItemInput{
-			TableName: aws.String(os.Getenv("LIBRARY_TABLE")),
-			Item:      bookMap,
-		}
-
-		_, err = db.PutItem(params)
-		if err != nil {
-			return proxyResponseBuilder(err.Error(), http.StatusInternalServerError)
-		}
-
-		message := struct {
-			Message string
-		}{fmt.Sprintf("Book %s created", book.ID)}
-
-		jsonMsg, _ := json.Marshal(message)
-
-		return proxyResponseBuilder(string(jsonMsg), http.StatusOK)
-	}
-
-	return proxyResponseBuilder("name is required", http.StatusBadRequest)
+	ginLambda = ginadapter.New(r)
 }
 
 func main() {
-	lambda.Start(HandleLambdaEvent)
+	lambda.Start(Handler)
+}
+
+func Handler(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+	// If no name is provided in the HTTP request body, throw an error
+	return ginLambda.ProxyWithContext(ctx, req)
+}
+
+func SaveHandler(c *gin.Context) {
+	bookJSON := new(model.BookRequest)
+
+	err := c.BindJSON(bookJSON)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.Error{
+			Err:  err,
+			Type: http.StatusInternalServerError,
+			Meta: err.Error(),
+		})
+
+		return
+	}
+
+	// Parse author form strings into idiomatic array
+	authors := make([]*string, 0)
+	for _, item := range bookJSON.Authors {
+		authors = append(authors, &item)
+	}
+
+	// Parse categories form strings into idiomatic array
+	categories := make([]*string,0)
+	for _, item := range bookJSON.Categories {
+		categories = append(categories, &item)
+	}
+
+	// Convert published_at to int64
+	var publishedAt int64
+	publishedAt = 0
+	if bookJSON.PublishedAt != "" {
+		convertedPublished, err := strconv.ParseInt(bookJSON.PublishedAt, 10, 64)
+		if err != nil {
+			publishedAt = 0
+		}
+
+		publishedAt = convertedPublished
+	}
+
+	book := model.NewBook(bookJSON.Name, nil, authors, categories, publishedAt)
+	err = book.Validate()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.Error{
+			Err:  err,
+			Type: http.StatusBadRequest,
+			Meta: err.Error(),
+		})
+		return
+	}
+
+	err = saveBook(book)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.Error{
+			Err:  err,
+			Type: http.StatusBadRequest,
+			Meta: err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": fmt.Sprintf("book %s created", book.ID),
+	})
+}
+
+func saveBook(book *model.BookModel) error {
+	ctxBackground := context.Background()
+	ctx, cancel := context.WithTimeout(ctxBackground, 30*time.Second)
+	defer cancel()
+
+	coll, err := docstore.OpenCollection(ctx, fmt.Sprintf("dynamodb://%s?partition_key=book_id", os.Getenv("LIBRARY_TABLE")))
+	if err != nil {
+		return err
+	}
+	defer coll.Close()
+
+	return coll.Create(ctx, book)
 }
