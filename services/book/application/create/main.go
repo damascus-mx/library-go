@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	ginadapter "github.com/awslabs/aws-lambda-go-api-proxy/gin"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -52,6 +54,8 @@ func SaveHandler(c *gin.Context) {
 
 		return
 	}
+
+
 
 	// Parse author form strings into idiomatic array
 	authors := make([]*string, 0)
@@ -108,11 +112,26 @@ func saveBook(book *model.BookModel) error {
 	ctx, cancel := context.WithTimeout(ctxBackground, 30*time.Second)
 	defer cancel()
 
-	coll, err := docstore.OpenCollection(ctx, fmt.Sprintf("dynamodb://%s?partition_key=book_id", os.Getenv("LIBRARY_TABLE")))
+	coll, err := docstore.OpenCollection(ctx, fmt.Sprintf("dynamodb://%s?partition_key=book_id&allow_scans=true", os.Getenv("LIBRARY_TABLE")))
 	if err != nil {
 		return err
 	}
 	defer coll.Close()
+
+	iter := coll.Query().Where("name", "=", book.Name).Limit(1).Get(ctx)
+	defer iter.Stop()
+
+	b := new(model.BookModel)
+	for {
+		err = iter.Next(ctx, b)
+		if err == io.EOF {
+			break
+		} else if err != nil {
+			return err
+		} else {
+			return errors.New("book already exists")
+		}
+	}
 
 	return coll.Create(ctx, book)
 }
