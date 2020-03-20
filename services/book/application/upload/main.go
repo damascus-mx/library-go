@@ -1,95 +1,240 @@
 package main
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
+	"errors"
+	"fmt"
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
+	ginadapter "github.com/awslabs/aws-lambda-go-api-proxy/gin"
+	"github.com/damascus-mx/library-go/services/book/application/upload/domain/model"
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gocloud.dev/blob"
+	"gocloud.dev/docstore"
+	_ "gocloud.dev/docstore/awsdynamodb"
+	_ "gocloud.dev/blob/s3blob"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
+	"os"
 	"strings"
+	"time"
 )
 
-func getSession() *session.Session {
-	config := &aws.Config{
-		Region: aws.String("us-east-1"),
-	}
+var ginLambda *ginadapter.GinLambda
 
-	sess := session.Must(session.NewSession(config))
+func init() {
+	log.Print("Gin cold start")
+	mux := gin.Default()
 
-	return sess
+	// Set MB limit for multipart form = 10 MB
+	mux.MaxMultipartMemory = 10 << 20
+
+	// Route mapping
+	mux.POST("/v1/upload/book/:book_id", uploadBookHandler)
+
+	ginLambda = ginadapter.New(mux)
 }
 
-func proxyResponseBuilder(messageStr string, status int) (*events.APIGatewayProxyResponse, error) {
-	message := struct {
-		Message string
-	}{ messageStr }
+func main() {
+	lambda.Start(Handler)
+}
 
-	jsonMsg, err := json.Marshal(message)
+func Handler(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+	// Proxy from default lambda handler to Gin engine router
+	return ginLambda.ProxyWithContext(ctx, req)
+}
+
+func getCollectionConn() (*docstore.Collection, error) {
+	ctxBackground := context.Background()
+	ctx, cancel := context.WithTimeout(ctxBackground, 30*time.Second)
+	defer cancel()
+
+	coll, err := docstore.OpenCollection(ctx, fmt.Sprintf("dynamodb://%s?partition_key=book_id&allow_scans=true", os.Getenv("LIBRARY_TABLE")))
 	if err != nil {
 		return nil, err
 	}
 
-	return &events.APIGatewayProxyResponse{
-		StatusCode:        status,
-		Headers:           map[string]string{
-			"Access-Control-Allow-Origin": "*",
-		},
-		MultiValueHeaders: nil,
-		Body:             string(jsonMsg),
-		IsBase64Encoded:   false,
-	}, nil
+	return coll, nil
 }
 
-func LambdaHandler(ctx context.Context, req events.APIGatewayProxyRequest) (*events.APIGatewayProxyResponse, error) {
-
-	id := req.PathParameters["id"]
-	if _, err := uuid.Parse(id); err != nil {
-		return proxyResponseBuilder("invalid id", http.StatusBadRequest)
+func uploadBookHandler(c *gin.Context) {
+	// Get ID from params, verify if nil
+	bookID := c.Param("book_id")
+	if bookID == "" {
+		err := errors.New("no book id received")
+		c.JSON(http.StatusBadRequest, gin.Error{
+			Err: err,
+			Type: http.StatusBadRequest,
+			Meta: err.Error(),
+		})
+		return
 	}
 
-	if req.Body == "" {
-		return proxyResponseBuilder("missing required fields", http.StatusBadRequest)
-	}
-
-	/*
-	_, err := base64.StdEncoding.DecodeString(req.Body)
+	// GetBook, if nil we cannot start file uploading process
+	book, err := getBook(bookID)
 	if err != nil {
-		return proxyResponseBuilder("failed to decode file", http.StatusInternalServerError)
-	}*/
-	var maxFileSize int64
-	maxFileSize = 20 * 1000 * 1000
-
-
-	// fileType := req.Headers["Content-Type"]
-	var r io.Reader
-
-	mp := multipart.NewReader(r, req.Body)
-	f, err := mp.ReadForm(maxFileSize)
-	if err == io.EOF {
-		return proxyResponseBuilder("failed to decode file", http.StatusInternalServerError)
+		c.JSON(http.StatusNotFound, gin.Error{
+			Err: err,
+			Type: http.StatusNotFound,
+			Meta: err.Error(),
+		})
+		return
 	}
-	x := f.Value["Content-Type"][0]
 
-	return &events.APIGatewayProxyResponse{
-		StatusCode:        200,
-		Headers:           map[string]string{
-			"Content-Type": strings.Split(req.Headers["Content-Type"], ";")[0],
-		},
-		MultiValueHeaders: nil,
-		Body:              x,
-		IsBase64Encoded:   false,
-	}, nil
+	// Get file from multipart
+	file, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.Error{
+			Err:  err,
+			Type: http.StatusInternalServerError,
+			Meta: err.Error(),
+		})
+		return
+	}
 
+	// Generate sanitized name
+	fileName, err := sanitizeFileName(file.Filename)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.Error{
+			Err:  err,
+			Type: http.StatusBadRequest,
+			Meta: err.Error(),
+		})
+		return
+	}
 
+	// Upload file to bucket
+	err = uploadFile(fileName, file)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.Error{
+			Err:  err,
+			Type: http.StatusInternalServerError,
+			Meta: err.Error(),
+		})
+		return
+	}
 
-	// return proxyResponseBuilder(req.Body, http.StatusNotFound)
+	// Update book
+	err = updateBook(book, "https://cdn.damascus-engineering.com/damascus/ebooks/"+fileName)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.Error{
+			Err:  err,
+			Type: http.StatusInternalServerError,
+			Meta: err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":fmt.Sprintf("file %s succesfuly uploaded", fileName),
+	})
 }
 
-func main() {
-	lambda.Start(LambdaHandler)
+func getBook(bookID string) (*model.BookModel, error) {
+	ctx := context.Background()
+	coll, err := getCollectionConn()
+	if err != nil {
+		return nil, err
+	}
+	defer coll.Close()
+
+	book := new(model.BookModel)
+	book.ID = bookID
+	err = coll.Get(ctx, book, "book_id")
+	if err != nil {
+		return nil, errors.New("book not found")
+	}
+
+	return book, nil
+}
+
+func getFileExtension(filename string) (string, error) {
+	splatFileName := strings.Split(filename, ".")
+	fileExtension := splatFileName[len(splatFileName) - 1]
+	if len(splatFileName) < 2 {
+		return "", errors.New("invalid file extension")
+	} else if fileExtension != "pdf" {
+		return "", errors.New("invalid file format, consider using pdf files")
+	}
+
+	return fileExtension, nil
+}
+
+func sanitizeFileName(filename string) (string, error) {
+	// Generate file UUID for name uniqueness
+	sanitizedName := uuid.New().String()
+
+	// Get file extension
+	fileExtension, err := getFileExtension(filename)
+	if err != nil {
+		return "", err
+	}
+
+	sanitizedName = fmt.Sprintf("%s.%s", sanitizedName, fileExtension)
+
+	return sanitizedName, nil
+}
+
+func uploadFile(fileName string, fileHeader *multipart.FileHeader) error {
+	ctx := context.Background()
+	bucket, err := blob.OpenBucket(ctx, "s3://cdn.damascus-engineering.com?region=us-west-2")
+	if err != nil {
+		return err
+	}
+	bucket = blob.PrefixedBucket(bucket, "damascus/ebooks/")
+	defer bucket.Close()
+
+	// Write file to bucket
+	// Create a cancelable context from the existing context.
+	writeCtx, cancelWrite := context.WithCancel(ctx)
+	defer cancelWrite()
+
+	// Open file from file header
+	file, err := fileHeader.Open()
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	// Open bucket writer
+	w, err := bucket.NewWriter(writeCtx, fileName, nil)
+	if err != nil {
+		return err
+	}
+
+	// Create new buffer and paste file data into it
+	buf := bytes.NewBuffer(nil)
+	_, err = io.Copy(buf, file)
+	if err != nil {
+		return err
+	}
+
+	// Write buffer's data
+	_, writeErr := w.Write(buf.Bytes())
+	// Close buffer writer securely
+	if writeErr != nil {
+		return writeErr
+	}
+
+	// Close bucket writer securely
+	closeErr := w.Close()
+	if closeErr != nil {
+		return closeErr
+	}
+
+	return nil
+}
+
+func updateBook(book *model.BookModel, fileURL string) error {
+	coll, err := getCollectionConn()
+	if err != nil {
+		return err
+	}
+	defer coll.Close()
+
+	return coll.Actions().Update(book, docstore.Mods{"s3_url": fileURL}).Do(context.Background())
 }
